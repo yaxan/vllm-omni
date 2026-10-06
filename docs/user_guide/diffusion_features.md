@@ -31,6 +31,7 @@ Cache methods trade minimal quality for significant speedup. Quality loss is typ
 |--------|-------------|----------|
 | **[TeaCache](diffusion/cache_acceleration/teacache.md)** | Adaptive caching using modulated inputs | Quick setup, balanced quality/speed on single GPU |
 | **[Cache-DiT](diffusion/cache_acceleration/cache_dit.md)** | Multiple caching techniques: DBCache, TaylorSeer, SCM | Fine-grained control, tunable quality-speed tradeoff |
+| **[LeapCache](diffusion/cache_acceleration/leapcache.md)** | Step-skipping cache for Wan2.1 text-to-video: leaps over early steps, replays held late steps, skips the late negative-prompt pass | Wan2.1 T2V 14B and 1.3B on one GPU; 2.3x at the default, one knob |
 
 #### Diffusion KV Prefix Caching
 
@@ -187,7 +188,7 @@ The following tables show which models support each feature:
 
 | Model                        | ⚡TeaCache | ⚡Cache-DiT | 🔀SP (Ulysses & Ring) | 🔀CFG-Parallel | 🔀Tensor-Parallel | Pipeline-Parallel | 🔀HSDP | 💾CPU Offload (Layerwise) | 💾VAE-Patch-Parallel | 💾Quantization | 🔄Step Execution |
 |------------------------------|:---------:|:----------:|:---------------------:|:--------------:|:-----------------:|:-----------------:|:------:|:-------------------------:|:--------------------:|:--------------:|:----------------:|
-| **Wan2.2**                   |     ❌     |     ✅      |           ✅           |       ✅        |         ✅         |         ✅         |   ✅    |             ✅             |  ✅ (encode/decode)   |       ❌        |        ❌         |
+| **Wan2.2**<sup>6</sup>       |     ❌     |     ✅      |           ✅           |       ✅        |         ✅         |         ✅         |   ✅    |             ✅             |  ✅ (encode/decode)   |       ❌        |        ❌         |
 | **Wan2.2-S2V**               |     ❌     |     ✅      |           ✅           |       ✅        |         ✅         |         ❌         |   ✅    |             ✅             |  ✅ (encode/decode)   |       ❌        |        ❌         |
 | **Wan2.1-VACE**              |     ❌     |     ✅      |           ✅           |       ✅        |         ✅         |         ❌         |   ✅    |             ✅             |      ✅ (decode)      |       ❌        |        ❌         |
 | **LTX-2**                    |     ❌     |     ✅      | ✅ (Ulysses only) |       ✅        |         ✅         |         ❌         |   ✅    |             ✅             |      ✅ (decode)      |       ❌        |        ❌         |
@@ -208,6 +209,9 @@ The following tables show which models support each feature:
 > the token sequence in isolation. Doing so would need a distributed scan or
 > an all-gather before every GDN block. The remaining ❌ columns are simply
 > unvalidated on this model, not known-broken.
+> 6. LeapCache, a cache backend without a column here, covers Wan2.1 T2V 1.3B
+> and 14B on a single device with one request per batch (`max_num_seqs=1`,
+> the default). See [LeapCache](diffusion/cache_acceleration/leapcache.md).
 
 > **Step execution note:** Helios supports single-request step execution only;
 > use `max_num_seqs=1`.
@@ -274,7 +278,7 @@ The Diffusion Acceleration navigation groups the remaining guides as follows:
 | --- | --- |
 | Compatibility | [Feature Compatibility](feature_compatibility.md) |
 | CPU offloading | [CPU Offloading](diffusion/cpu_offload.md) |
-| Cache acceleration | [TeaCache](diffusion/cache_acceleration/teacache.md), [Cache-DiT](diffusion/cache_acceleration/cache_dit.md) |
+| Cache acceleration | [TeaCache](diffusion/cache_acceleration/teacache.md), [Cache-DiT](diffusion/cache_acceleration/cache_dit.md), [LeapCache](diffusion/cache_acceleration/leapcache.md) |
 | KV cache paging | [Scheduler-Managed Paged KV Cache](diffusion/paged_kv_cache.md) |
 | Parallelism | [Parallelism Overview](diffusion/parallelism/overview.md) |
 | Attention | [Attention Backends](diffusion/attention_backends.md) |
