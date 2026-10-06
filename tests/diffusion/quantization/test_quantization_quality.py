@@ -73,6 +73,8 @@ class QualityTestConfig:
     max_lpips: float | dict[str, float]  # threshold, or {"H100": 0.15, "B200": 0.17}
     model: str | None = None  # HF model name
     quantization: str | dict[str, object] | None = None  # quantization method/config, e.g. "fp8"
+    cache_backend: str | None = None  # cache backend for the variant run, e.g. "leap_cache"
+    cache_config: dict[str, object] | None = None  # its cache_config, or None for the backend defaults
     baseline_model: str | None = None  # explicit BF16/local baseline path
     quantized_model: str | None = None  # explicit quantized/local model path
     height: int = 1024
@@ -101,7 +103,9 @@ class QualityTestConfig:
 
     def validate(self) -> None:
         uses_explicit_models = self.baseline_model is not None or self.quantized_model is not None
-        uses_model_plus_method = self.model is not None or self.quantization is not None
+        uses_model_plus_method = (
+            self.model is not None or self.quantization is not None or self.cache_backend is not None
+        )
 
         if uses_explicit_models and uses_model_plus_method:
             raise ValueError(f"{self.id}: explicit baseline/quantized paths cannot be mixed with model/quantization")
@@ -111,8 +115,12 @@ class QualityTestConfig:
                 raise ValueError(f"{self.id}: baseline_model and quantized_model must be provided together")
             return
 
-        if self.model is None or self.quantization is None:
-            raise ValueError(f"{self.id}: expected either model+quantization or baseline_model+quantized_model")
+        if self.quantization is not None and self.cache_backend is not None:
+            raise ValueError(f"{self.id}: quantization and cache_backend cannot be combined in one variant")
+        if self.model is None or (self.quantization is None and self.cache_backend is None):
+            raise ValueError(
+                f"{self.id}: expected model+quantization, model+cache_backend or baseline_model+quantized_model"
+            )
 
 
 # Add new quantization methods / models here.
@@ -220,6 +228,24 @@ QUALITY_CONFIGS = [
         seed=42,
         negative_prompt=None,
         diffusion_attention_backend="TORCH_SDPA",
+    ),
+    QualityTestConfig(
+        id="leap_cache_wan21_1p3b",
+        model="Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+        cache_backend="leap_cache",
+        task="t2v",
+        prompt=(
+            "A red silk scarf ripples above a table covered in finely woven blue fabric, "
+            "with soft side lighting and a slow camera push toward the moving folds."
+        ),
+        # Mean LPIPS against the same-seed uncached clip; the 1.3B measured 0.053 at the default threshold.
+        max_lpips=0.10,
+        height=480,
+        width=832,
+        num_frames=81,
+        num_inference_steps=40,
+        guidance_scale=4.0,
+        seed=179961516,
     ),
     QualityTestConfig(
         id="fp8_ltx2",
@@ -599,6 +625,10 @@ def test_quantization_quality(config: QualityTestConfig):
     # --- Quantized ---
     quantization = config.quantization_ref()
     qt_kwargs = _build_omni_kwargs(config, config.quantized_ref())
+    if config.cache_backend is not None:
+        qt_kwargs["cache_backend"] = config.cache_backend
+        if config.cache_config is not None:
+            qt_kwargs["cache_config"] = config.cache_config
     if quantization is None:
         omni_qt = Omni(**qt_kwargs)
     else:
@@ -615,7 +645,7 @@ def test_quantization_quality(config: QualityTestConfig):
     gpu_key, max_lpips = resolve_device_threshold(config.max_lpips, label=f"{config.id} max_lpips")
     assert lpips_score <= max_lpips, (
         f"LPIPS {lpips_score:.4f} exceeds threshold {max_lpips} ({gpu_key}) "
-        f"for {config.quantization_ref() or 'pre-quantized checkpoint'} on {config.quantized_ref()}"
+        f"for {config.quantization_ref() or config.cache_backend or 'pre-quantized checkpoint'} on {config.quantized_ref()}"
     )
 
     # --- Report ---
@@ -625,7 +655,7 @@ def test_quantization_quality(config: QualityTestConfig):
     print(f"{'=' * 60}")
     print(f"  Baseline:      {config.baseline_ref()}")
     print(f"  Quantized:     {config.quantized_ref()}")
-    print(f"  Method:        {config.quantization_ref() or 'pre-quantized checkpoint'}")
+    print(f"  Method:        {config.quantization_ref() or config.cache_backend or 'pre-quantized checkpoint'}")
     print(f"  LPIPS:         {lpips_score:.4f}  (threshold: {max_lpips}, gpu: {gpu_key})")
     print(f"  PSNR:          {psnr_score:.4f} dB  (higher is better)")
     print(f"  MAE:           {mae_score:.6f}  (lower is better)")

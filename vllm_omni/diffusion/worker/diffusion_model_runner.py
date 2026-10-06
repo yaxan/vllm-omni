@@ -715,6 +715,7 @@ class DiffusionModelRunner(DiffusionStagePayloadMixin):
             "tea_cache",
             "sea_cache",
             "step_cache",
+            "leap_cache",
         ):
             # When num_inference_steps is None, some pipelines defer to their
             # own defaults. These backends use refresh to reset request state;

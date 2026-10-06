@@ -5,6 +5,7 @@ from typing import Any
 
 from vllm_omni.diffusion.cache.base import CacheBackend
 from vllm_omni.diffusion.cache.cachedit import CacheDiTBackend
+from vllm_omni.diffusion.cache.leapcache import LeapCacheBackend
 from vllm_omni.diffusion.cache.magcache import MagCacheBackend
 from vllm_omni.diffusion.cache.seacache import SeaCacheBackend
 from vllm_omni.diffusion.cache.stepcache import StepCacheBackend
@@ -21,10 +22,11 @@ def get_cache_backend(cache_backend: str | None, cache_config: Any) -> CacheBack
     - mag_cache: Uses MagCacheBackend with enable()/refresh() interface
     - sea_cache: Uses SeaCacheBackend for spectral residual caching
     - step_cache: Uses StepCacheBackend for DreamZero velocity step skip
+    - leap_cache: Uses LeapCacheBackend for Wan2.1 text-to-video step skipping
 
     Args:
         cache_backend: Cache backend name ("cache_dit", "tea_cache",
-            "mag_cache", "sea_cache", "step_cache", or None).
+            "mag_cache", "sea_cache", "step_cache", "leap_cache", or None).
         cache_config: Cache configuration (dict or DiffusionCacheConfig instance).
 
     Returns:
@@ -49,8 +51,10 @@ def get_cache_backend(cache_backend: str | None, cache_config: Any) -> CacheBack
         return SeaCacheBackend(cache_config)
     elif cache_backend in ("step_cache", "stepcache", "step_cache_dit"):
         return StepCacheBackend(cache_config)
+    elif cache_backend == "leap_cache":
+        return LeapCacheBackend(cache_config)
     else:
         raise ValueError(
             f"Unsupported cache backend: {cache_backend}. "
-            "Supported: 'cache_dit', 'tea_cache', 'mag_cache', 'sea_cache', 'step_cache'"
+            "Supported: 'cache_dit', 'tea_cache', 'mag_cache', 'sea_cache', 'step_cache', 'leap_cache'"
         )
