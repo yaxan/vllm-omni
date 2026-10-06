@@ -582,6 +582,7 @@ class DiffusionCacheConfig:
                     sea_max_consecutive_cached, sea_power_exp
         - step_cache: step_cache_dit_enabled, velocity_sim_thresholds,
                           velocity_skip_countdowns, step_cache_dit_min_history
+        - LeapCache: leap_threshold
 
     Example:
         >>> # From dict (user-facing API) - partial config uses defaults for missing keys
@@ -667,6 +668,10 @@ class DiffusionCacheConfig:
     velocity_skip_countdowns: list[int] = field(default_factory=lambda: [4, 2])
     step_cache_dit_min_history: int = 2
     step_cache_dit_max_history: int = 2
+
+    # LeapCache parameters [leap_cache only]
+    # Default: 0.064 predicted relative change of the model output accepted before the model runs again
+    leap_threshold: float = 0.064
 
     # Additional parameters that may be passed but not explicitly defined
     _extra_params: dict[str, Any] = field(default_factory=dict, repr=False)

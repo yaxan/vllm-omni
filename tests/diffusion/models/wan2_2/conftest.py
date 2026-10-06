@@ -77,7 +77,7 @@ def noop_progress_bar(*args, **kwargs):
     del args, kwargs
 
     class Bar:
-        def update(self) -> None:
+        def update(self, n: int = 1) -> None:
             return None
 
     yield Bar()

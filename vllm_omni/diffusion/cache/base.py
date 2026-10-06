@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 
 """
 Base cache backend interface for diffusion models.
@@ -15,6 +15,8 @@ Main cache backend implementations:
    CacheBackend. Used via cache_backend="tea_cache".
 3. StepCacheBackend: Velocity cosine step-skipping for DreamZero. Inherits from
    CacheBackend. Used via cache_backend="step_cache".
+4. LeapCacheBackend: Step skipping with look-ahead and replay for Wan2.1 text-to-video.
+   Inherits from CacheBackend. Used via cache_backend="leap_cache".
 
 All backends implement the same interface:
 - enable(pipeline): Enable cache on the pipeline

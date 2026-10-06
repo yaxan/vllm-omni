@@ -8,6 +8,7 @@ import logging
 import os
 import time
 from collections.abc import Iterable
+from contextlib import nullcontext
 from typing import Any, ClassVar, cast
 
 import PIL.Image
@@ -19,6 +20,7 @@ from vllm.model_executor.layers.quantization.base_config import QuantizationConf
 from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm.sequence import IntermediateTensors
 
+from vllm_omni.diffusion.cache.leapcache import GUIDANCE_INTERVAL, get_leapcache_config, get_leapcache_runtime
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.distributed.autoencoders.autoencoder_kl_wan import DistributedAutoencoderKLWan
 from vllm_omni.diffusion.distributed.cfg_parallel import CFGParallelMixin
@@ -595,8 +597,14 @@ class Wan22Pipeline(
     ) -> torch.Tensor | AsyncLatents:
         if attention_kwargs is None:
             attention_kwargs = {}
-        with self.progress_bar(total=len(timesteps)) as pbar:
-            for step_idx, t in enumerate(timesteps):
+        leap_cache = get_leapcache_runtime(self)
+        with (
+            nullcontext() if leap_cache is None else leap_cache.request(self.scheduler, latents),
+            self.progress_bar(total=len(timesteps)) as pbar,
+        ):
+            step_idx = 0
+            while step_idx < len(timesteps):
+                t = timesteps[step_idx]
                 self._current_timestep = t
                 self.record_denoise_step(step_idx, t)
 
@@ -670,6 +678,8 @@ class Wan22Pipeline(
                 else:
                     negative_kwargs = None
 
+                if leap_cache is not None:
+                    leap_cache.begin_step(step_idx, do_true_cfg)
                 noise_pred = self.predict_noise_maybe_with_cfg(
                     do_true_cfg=do_true_cfg,
                     true_cfg_scale=current_guidance_scale,
@@ -678,6 +688,7 @@ class Wan22Pipeline(
                     cfg_normalize=False,
                 )
 
+                next_step_idx = step_idx + 1
                 if self.is_dmd:
                     pred_clean = self.scheduler.predict_clean(noise_pred, latents, t).to(noise_pred.dtype)
                     if step_idx + 1 < len(timesteps):
@@ -691,8 +702,12 @@ class Wan22Pipeline(
                     else:
                         latents = pred_clean
                 else:
+                    if leap_cache is not None:
+                        next_step_idx = leap_cache.next_step(noise_pred, latents)
+                        latents = leap_cache.before_scheduler_step(noise_pred, latents)
                     latents = self.scheduler_step_maybe_with_cfg(noise_pred, t, latents, do_true_cfg)
-                pbar.update()
+                pbar.update(next_step_idx - step_idx)
+                step_idx = next_step_idx
 
         return latents
 
@@ -750,6 +765,14 @@ class Wan22Pipeline(
         guidance_interval = resolve_wan_guidance_interval(req.requests[0])
         if guidance_interval is not None and self.expand_timesteps:
             raise ValueError("guidance_interval is not supported on expand_timesteps (TI2V) Wan checkpoints")
+        if get_leapcache_config(self) is not None:
+            if guidance_low != guidance_high:
+                raise ValueError(
+                    "LeapCache needs one guidance scale for the whole request; "
+                    "guidance_scale_2 must equal guidance_scale"
+                )
+            if guidance_interval is None:
+                guidance_interval = GUIDANCE_INTERVAL
 
         # record guidance for properties
         self._guidance_scale = guidance_low
@@ -1078,6 +1101,9 @@ class Wan22Pipeline(
         """
         if current_model is None:
             current_model = self.transformer
+        leap_cache = get_leapcache_runtime(self)
+        if leap_cache is not None:
+            return leap_cache.predict_noise(kwargs["hidden_states"], lambda: current_model(**kwargs)[0])
         result = current_model(**kwargs)
         return result if isinstance(result, IntermediateTensors) else result[0]
 

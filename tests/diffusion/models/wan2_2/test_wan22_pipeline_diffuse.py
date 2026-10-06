@@ -2,13 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 
 import importlib
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 
 import pytest
 import torch
 from torch import nn
 
+from vllm_omni.diffusion.cache.leapcache import (
+    LEAP_CACHE_CONFIG_ATTR,
+    LEAP_CACHE_RUNTIME_ATTR,
+    LeapCacheConfig,
+    LeapCacheRuntime,
+)
 from vllm_omni.diffusion.media import VideoTensorEncoding, VideoTensorLayout, VideoValueRange
 from vllm_omni.diffusion.models.wan2_2.pipeline_wan2_2 import Wan22Pipeline, build_wan_scheduler
 from vllm_omni.diffusion.models.wan2_2.wan2_2_transformer import WanSelfAttention
@@ -70,7 +76,7 @@ def _noop_progress_bar(*args, **kwargs):
     del args, kwargs
 
     class _Bar:
-        def update(self) -> None:
+        def update(self, n: int = 1) -> None:
             return None
 
     yield _Bar()
@@ -779,3 +785,130 @@ def test_forward_rejects_guidance_interval_on_expand_timesteps_checkpoints() -> 
     pipeline.expand_timesteps = True
     with pytest.raises(ValueError, match="expand_timesteps"):
         _forward_with_extra_args(pipeline, {"guidance_interval": [600, 1000]})
+
+
+class _LeapStubTransformer(_StubTransformer):
+    def forward(self, hidden_states, encoder_hidden_states, **kwargs):
+        positive = bool(encoder_hidden_states[0, 0] > 0)
+        return (torch.ones_like(hidden_states) * (1.0 if positive else -1.0),)
+
+
+class _RecordingLeapCache(LeapCacheRuntime):
+    """Records the hook calls, drops step 1 from the loop and marks the latent before every solver step."""
+
+    def __init__(self) -> None:
+        super().__init__(LeapCacheConfig())
+        self.events: list[tuple] = []
+        self.step_index = 0
+
+    @contextmanager
+    def request(self, scheduler, latents):
+        self.events.append(("request", int(latents.shape[0])))
+        yield
+        self.events.append(("end",))
+
+    def begin_step(self, step_index, do_true_cfg):
+        self.step_index = step_index
+        self.events.append(("begin", step_index, do_true_cfg))
+
+    def predict_noise(self, hidden_states, run_model):
+        output = run_model()
+        self.events.append(("predict", float(output.mean())))
+        return output
+
+    def next_step(self, noise_pred, latents):
+        next_index = 2 if self.step_index == 0 else self.step_index + 1
+        self.events.append(("next", next_index))
+        return next_index
+
+    def before_scheduler_step(self, noise_pred, latents):
+        self.events.append(("before",))
+        return latents + 100.0
+
+
+def _run_diffuse_recording_the_loop(pipeline, monkeypatch):
+    updates: list[int] = []
+    denoise_steps: list[tuple[int, float]] = []
+    solver_calls: list[tuple[float, float]] = []
+
+    def _fake_scheduler_step_maybe_with_cfg(noise_pred, t, current_latents, do_true_cfg):
+        solver_calls.append((float(t), float(current_latents.mean())))
+        return current_latents + noise_pred
+
+    pipeline.transformer = _LeapStubTransformer()
+    pipeline.progress_bar = lambda **kwargs: nullcontext(SimpleNamespace(update=updates.append))
+    monkeypatch.setattr(pipeline, "record_denoise_step", lambda step_idx, t: denoise_steps.append((step_idx, float(t))))
+    monkeypatch.setattr(pipeline, "scheduler_step_maybe_with_cfg", _fake_scheduler_step_maybe_with_cfg)
+    pipeline.diffuse(
+        latents=torch.zeros((1, 1, 1, 2, 2), dtype=torch.float32),
+        timesteps=torch.tensor([900.0, 600.0, 500.0]),
+        prompt_embeds=torch.ones(1, 8),
+        negative_prompt_embeds=-torch.ones(1, 8),
+        guidance_low=4.0,
+        guidance_high=4.0,
+        boundary_timestep=None,
+        dtype=torch.float32,
+        attention_kwargs={},
+        guidance_interval=(600.0, 1000.0),
+    )
+    return updates, denoise_steps, solver_calls
+
+
+def test_diffuse_leapcache_hooks_drive_the_loop_only_when_attached(monkeypatch) -> None:
+    # Guided steps add 7 to the latent (-1 + 4 * (1 - -1)); the unguided step at t=500 adds the prompt pass, 1.
+    assert _run_diffuse_recording_the_loop(_make_pipeline(), monkeypatch) == (
+        [1, 1, 1],
+        [(0, 900.0), (1, 600.0), (2, 500.0)],
+        [(900.0, 0.0), (600.0, 7.0), (500.0, 14.0)],
+    )
+
+    pipeline = _make_pipeline()
+    leap_cache = _RecordingLeapCache()
+    setattr(pipeline, LEAP_CACHE_RUNTIME_ATTR, leap_cache)
+    # The loop follows the runtime's next step, reports original step indices, and the solver
+    # steps from the latent the runtime returned.
+    assert _run_diffuse_recording_the_loop(pipeline, monkeypatch) == (
+        [2, 1],
+        [(0, 900.0), (2, 500.0)],
+        [(900.0, 100.0), (500.0, 207.0)],
+    )
+    assert leap_cache.events == [
+        ("request", 1),
+        ("begin", 0, True),
+        ("predict", 1.0),
+        ("predict", -1.0),
+        ("next", 2),
+        ("before",),
+        ("begin", 2, False),
+        ("predict", 1.0),
+        ("next", 3),
+        ("before",),
+        ("end",),
+    ]
+
+
+def test_forward_uses_the_leapcache_guidance_interval_unless_the_request_sets_one() -> None:
+    pipeline = _make_pipeline()
+    setattr(pipeline, LEAP_CACHE_CONFIG_ATTR, LeapCacheConfig())
+    assert _forward_with_extra_args(pipeline, {})["guidance_interval"] == (600.0, 1000.0)
+    assert _forward_with_extra_args(pipeline, {"guidance_interval": [300, 900]})["guidance_interval"] == (300.0, 900.0)
+
+
+def test_forward_rejects_two_guidance_scales_when_leapcache_is_attached() -> None:
+    pipeline = _make_pipeline()
+    setattr(pipeline, LEAP_CACHE_CONFIG_ATTR, LeapCacheConfig())
+    pipeline.diffuse = lambda *, latents, **kwargs: latents  # type: ignore[method-assign]
+    request = OmniDiffusionRequest(
+        prompt="prompt",
+        request_id="test-req",
+        sampling_params=OmniDiffusionSamplingParams(
+            num_frames=1,
+            num_inference_steps=2,
+            max_sequence_length=32,
+            output_type="latent",
+            guidance_scale=4.0,
+            guidance_scale_2=3.0,
+        ),
+    )
+    with pytest.raises(ValueError, match="one guidance scale"):
+        pipeline.forward(DiffusionRequestBatch(requests=[request]))

@@ -302,7 +302,7 @@ def parse_args() -> argparse.Namespace:
         "--cache-backend",
         type=str,
         default=None,
-        choices=["cache_dit"],
+        choices=["cache_dit", "leap_cache"],
         help="Cache backend for supported diffusion pipelines. Default: None.",
     )
     parser.add_argument(

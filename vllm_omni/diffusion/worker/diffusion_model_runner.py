@@ -206,7 +206,7 @@ class DiffusionModelRunner(DiffusionStagePayloadMixin):
         self.kv_transfer_manager = (
             payload_transfer_manager if getattr(od_config, "kv_transfer_config", None) is None else None
         )
-        self.init_omni_connectors(od_config, payload_transfer_manager, synchronous=True)
+        self.init_omni_connectors(od_config, payload_transfer_manager, synchronous=True)  # type: ignore[arg-type]
         self._kv_connector = None
         from vllm_omni.diffusion.diffusion_kv.kv_connector import KVReceiveProgress, native_prefetch_enabled
 
@@ -704,6 +704,7 @@ class DiffusionModelRunner(DiffusionStagePayloadMixin):
             "tea_cache",
             "sea_cache",
             "step_cache",
+            "leap_cache",
         ):
             # When num_inference_steps is None, some pipelines defer to their
             # own defaults. These backends use refresh to reset request state;
@@ -1453,7 +1454,7 @@ class DiffusionModelRunner(DiffusionStagePayloadMixin):
                                 else req.denoise_completed
                             )
                             if finished and result is not None:
-                                self._maybe_send_stage_payload([req], [result])
+                                self._maybe_send_stage_payload([req], [result])  # type: ignore[list-item]
                             runner_output_list.append(
                                 RunnerOutput(
                                     request_id=req.request_id,
