@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 
 """
-Benchmark quantization quality loss for diffusion models (image & video).
+Benchmark the quality loss of quantization or a cache backend for diffusion models (image & video).
 
-Generates outputs with BF16 (baseline) and a quantized config using the same
-seed, then computes LPIPS perceptual distance between them. Results are printed
-as a Markdown table ready to paste into a PR description.
+Generates outputs with BF16 (baseline) and a variant (a quantization method or a
+cache backend) using the same seed, then computes LPIPS perceptual distance
+between them. Results are printed as a Markdown table ready to paste into a PR
+description. ``--compare`` scores two saved videos instead of generating them.
 
 Requirements:
     pip install lpips Pillow numpy
@@ -53,15 +54,30 @@ Multiple quantization methods:
         --height 1024 --width 1024 \
         --num-inference-steps 50 --seed 42
 
+Cache backend as the variant (text-to-video):
+    python benchmarks/diffusion/quantization_quality.py \
+        --model Wan-AI/Wan2.1-T2V-14B-Diffusers \
+        --task t2v \
+        --cache-backend leap_cache \
+        --cache-config '{"leap_threshold": 0.064}' \
+        --prompts "a ballerina practicing in the dance studio" \
+        --height 480 --width 832 \
+        --num-frames 81 --num-inference-steps 40 --seed 42
+
+Score two saved videos (MP4 files or directories of PNG frames) frame by frame:
+    python benchmarks/diffusion/quantization_quality.py \
+        --compare quant_bench_output/baseline/prompt_0.mp4 quant_bench_output/leap_cache/prompt_0.mp4
+
 Output directory structure (--output-dir, default: ./quant_bench_output):
     quant_bench_output/
         baseline/           # BF16 outputs
-        <method>/           # Quantized outputs per method
+        <variant>/          # Outputs per quantization method or cache backend
         results.md          # Markdown table
 """
 
 import argparse
 import gc
+import json
 import time
 from pathlib import Path
 
@@ -102,19 +118,16 @@ def compute_lpips_images(
     return scores
 
 
-def compute_lpips_video(
+def compute_lpips_frames(
     baseline_frames: np.ndarray,
     quantized_frames: np.ndarray,
     net: str = "alex",
-) -> float:
-    """Compute mean per-frame LPIPS for a video pair.
+) -> list[float]:
+    """Compute per-frame LPIPS for a video pair.
 
     Args:
         baseline_frames: (F, H, W, C) float array in [0, 1].
         quantized_frames: same shape.
-
-    Returns:
-        Mean LPIPS across all frames.
     """
     import lpips
 
@@ -133,11 +146,20 @@ def compute_lpips_video(
         with torch.no_grad():
             score = loss_fn(f_bl, f_qt).item()
         scores.append(score)
-    return float(np.mean(scores))
+    return scores
 
 
-def _build_omni_kwargs(args, quantization=None):
-    """Build kwargs dict for Omni() constructor."""
+def compute_lpips_video(
+    baseline_frames: np.ndarray,
+    quantized_frames: np.ndarray,
+    net: str = "alex",
+) -> float:
+    """Compute mean per-frame LPIPS for a video pair."""
+    return float(np.mean(compute_lpips_frames(baseline_frames, quantized_frames, net=net)))
+
+
+def _build_omni_kwargs(args, variant=None):
+    """Build kwargs dict for Omni() constructor; ``variant`` holds the quantization or cache kwargs."""
     from vllm_omni.diffusion.data import DiffusionParallelConfig
 
     parallel_config = DiffusionParallelConfig(
@@ -150,8 +172,8 @@ def _build_omni_kwargs(args, quantization=None):
         "parallel_config": parallel_config,
         "enforce_eager": args.enforce_eager,
     }
-    if quantization:
-        kwargs["quantization_config"] = quantization
+    if variant:
+        kwargs.update(variant)
     return kwargs
 
 
@@ -200,6 +222,7 @@ def _generate_video(omni, args, prompt, seed):
             guidance_scale=args.guidance_scale,
             num_inference_steps=args.num_inference_steps,
             num_frames=args.num_frames,
+            extra_args={} if args.flow_shift is None else {"flow_shift": args.flow_shift},
         ),
     )
     elapsed = time.perf_counter() - start
@@ -265,15 +288,17 @@ def run_benchmark(args):
     seed = args.seed
 
     # Determine configs to benchmark
-    configs = []  # list of (label, quantization_method)
+    configs = []  # list of (label, Omni kwargs that set the variant apart from the baseline)
     for method in args.quantization:
-        configs.append((method, method))
+        configs.append((method, {"quantization_config": method}))
+    if args.cache_backend:
+        configs.append((args.cache_backend, {"cache_backend": args.cache_backend, "cache_config": args.cache_config}))
 
     # --- Baseline run ---
     print("\n" + "=" * 60)
     print("Running BF16 baseline...")
     print("=" * 60)
-    bl_kwargs = _build_omni_kwargs(args, quantization=None)
+    bl_kwargs = _build_omni_kwargs(args)
     omni_bl = Omni(**bl_kwargs)
 
     baseline_outputs = {}  # prompt -> (output, time, mem)
@@ -307,15 +332,15 @@ def run_benchmark(args):
         else:
             out.save(bl_dir / f"prompt_{i}.png")
 
-    # --- Quantized runs ---
+    # --- Variant runs ---
     all_results = []  # list of dicts
 
-    for config_label, quant_method in configs:
+    for config_label, variant in configs:
         print(f"\n{'=' * 60}")
         print(f"Running: {config_label}...")
         print("=" * 60)
 
-        qt_kwargs = _build_omni_kwargs(args, quantization=quant_method)
+        qt_kwargs = _build_omni_kwargs(args, variant)
         omni_qt = Omni(**qt_kwargs)
 
         qt_outputs = {}
@@ -333,7 +358,7 @@ def run_benchmark(args):
         del omni_qt
         _free_gpu_memory()
 
-        # Save quantized outputs
+        # Save variant outputs
         qt_dir = output_dir / config_label.replace(" ", "_")
         qt_dir.mkdir(parents=True, exist_ok=True)
 
@@ -380,11 +405,16 @@ def run_benchmark(args):
 
     # Summary table
     lines = []
-    lines.append(f"## Quantization Quality Benchmark — {args.model.split('/')[-1]}")
+    lines.append(f"## Quality Benchmark: {args.model.split('/')[-1]}")
     lines.append(
         f"Setup: {args.height}x{args.width}, {args.num_inference_steps} steps, "
         f"seed={args.seed}, LPIPS ({args.lpips_net})"
     )
+    if args.cache_backend:
+        lines.append(
+            f"Cache config ({args.cache_backend}): "
+            f"{json.dumps(args.cache_config) if args.cache_config else 'backend defaults'}"
+        )
     if is_video:
         lines.append(f"Video: {args.num_frames} frames")
     lines.append("")
@@ -432,15 +462,48 @@ def run_benchmark(args):
     print(f"Baseline outputs in {bl_dir}")
     for r in all_results:
         qt_dir = output_dir / r["config"].replace(" ", "_")
-        print(f"Quantized outputs in {qt_dir}")
+        print(f"Variant outputs in {qt_dir}")
+
+
+def _load_frames(path: Path) -> np.ndarray:
+    """Load an MP4 file or a directory of PNG frames as a (F, H, W, C) float array in [0, 1]."""
+    if path.is_dir():
+        from PIL import Image
+
+        frames = [np.asarray(Image.open(p).convert("RGB")) for p in sorted(path.glob("*.png"))]
+    else:
+        import imageio.v3 as iio
+
+        frames = list(iio.imiter(path))
+    if not frames:
+        raise ValueError(f"No frames found in {path}")
+    return np.stack(frames).astype(np.float32) / 255.0
+
+
+def compare_videos(args):
+    """Print the mean and worst per-frame LPIPS between two saved videos."""
+    baseline, variant = (Path(p) for p in args.compare)
+    bl_frames = _load_frames(baseline)
+    vt_frames = _load_frames(variant)
+    if bl_frames.shape != vt_frames.shape:
+        raise ValueError(
+            f"{baseline}: {bl_frames.shape[0]} frames of {bl_frames.shape[2]}x{bl_frames.shape[1]}; "
+            f"{variant}: {vt_frames.shape[0]} frames of {vt_frames.shape[2]}x{vt_frames.shape[1]}. "
+            "Both videos must have the same frame count and size."
+        )
+    scores = compute_lpips_frames(bl_frames, vt_frames, net=args.lpips_net)
+    worst = int(np.argmax(scores))
+    print(f"Frames: {len(scores)} ({bl_frames.shape[2]}x{bl_frames.shape[1]})")
+    print(f"Mean LPIPS ({args.lpips_net}): {np.mean(scores):.4f}")
+    print(f"Worst frame: {scores[worst]:.4f} (frame {worst})")
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Benchmark quantization quality loss for diffusion models.",
+        description="Benchmark the quality loss of quantization or a cache backend for diffusion models.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--model", required=True, help="Model name or local path.")
+    parser.add_argument("--model", help="Model name or local path.")
     parser.add_argument(
         "--task",
         default="t2i",
@@ -450,8 +513,26 @@ def parse_args():
     parser.add_argument(
         "--quantization",
         nargs="+",
-        required=True,
+        default=[],
         help="One or more quantization methods to benchmark (e.g. fp8 int8 bitsandbytes).",
+    )
+    parser.add_argument(
+        "--cache-backend",
+        type=str,
+        default=None,
+        help="Cache backend to benchmark as a variant (e.g. leap_cache).",
+    )
+    parser.add_argument(
+        "--cache-config",
+        type=json.loads,
+        default=None,
+        help="Cache backend settings as JSON, e.g. '{\"leap_threshold\": 0.064}'. Default: the backend defaults.",
+    )
+    parser.add_argument(
+        "--compare",
+        nargs=2,
+        metavar=("BASELINE", "VARIANT"),
+        help="Score two saved videos (MP4 files or directories of PNG frames) instead of generating them.",
     )
     parser.add_argument(
         "--prompts",
@@ -466,6 +547,12 @@ def parse_args():
     parser.add_argument("--num-frames", type=int, default=81, help="Number of video frames (t2v only).")
     parser.add_argument("--fps", type=int, default=24, help="Video FPS for saving (t2v only).")
     parser.add_argument("--guidance-scale", type=float, default=4.0, help="CFG scale (used for video).")
+    parser.add_argument(
+        "--flow-shift",
+        type=float,
+        default=None,
+        help="Scheduler flow shift for Wan (t2v only); model default if unset.",
+    )
     parser.add_argument("--output-dir", type=str, default="./quant_bench_output", help="Directory to save outputs.")
     parser.add_argument(
         "--lpips-net",
@@ -478,9 +565,15 @@ def parse_args():
     parser.add_argument("--ring-degree", type=int, default=1)
     parser.add_argument("--tensor-parallel-size", type=int, default=1)
     parser.add_argument("--enforce-eager", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.compare is None and not (args.model and (args.quantization or args.cache_backend)):
+        parser.error("--model and one of --quantization / --cache-backend are required unless --compare is given")
+    return args
 
 
 if __name__ == "__main__":
     args = parse_args()
-    run_benchmark(args)
+    if args.compare:
+        compare_videos(args)
+    else:
+        run_benchmark(args)

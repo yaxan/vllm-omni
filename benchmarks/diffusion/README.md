@@ -183,3 +183,19 @@ and checks bitwise repeatability for repeated requests at the same hit boundary.
 Images, logs, deployment YAMLs, hit traces and quality metrics are saved under
 pytest's temporary output directory. `HUNYUAN_IMAGE3_MODEL` selects a local model;
 DFX uses the repository's normal model/cache resolution.
+
+## Same-seed quality benchmark
+
+`quantization_quality.py` generates each prompt twice with the same seed, once as the BF16
+baseline and once with a quantization method (`--quantization fp8`) or a cache backend
+(`--cache-backend leap_cache --cache-config '{"leap_threshold": 0.064}'`), and reports the
+variant's speed-up, peak memory and mean LPIPS against the baseline (LPIPS scores how different
+two frames look; 0 is the same picture). `--flow-shift` sets Wan's scheduler shift when a run needs
+something other than the model default. To score two saved clips against each other, pass two
+MP4 files or two directories of PNG frames:
+
+```bash
+python benchmarks/diffusion/quantization_quality.py --compare baseline/prompt_0.mp4 leap_cache/prompt_0.mp4
+```
+
+It prints the frame count and the mean and worst per-frame LPIPS.
