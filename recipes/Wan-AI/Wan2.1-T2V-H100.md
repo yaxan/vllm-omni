@@ -33,12 +33,15 @@ LeapCache does not run with parallelism. For multi-GPU Wan serving, see the
 | Text-to-video | Text prompt, optional negative prompt | MP4 clip of 81 frames at 832x480 for both checkpoints, or 1280x720 for the 14B. The model card recommends 480p for the 1.3B | Offline `Omni`, `POST /v1/videos` and `POST /v1/videos/sync` |
 
 Profiles on this hardware at 81 frames, 40 steps, guidance 4, flow shift 5 and
-the default `leap_threshold`. LPIPS is against the uncached clip from the same
-seed, the mean over the four development prompts and the worst single prompt:
+the default `leap_threshold`. Every number in this recipe was measured before
+the dropped early steps were also redone, a change made on 2026-10-08 and
+described in the guide; the numbers are to be re-measured. LPIPS is against the
+uncached clip from the same seed, the mean over the four development prompts
+and the worst single prompt:
 
 | Profile | Checkpoint | Speed-up | LPIPS mean / worst | Status |
 | --- | --- | ---: | ---: | --- |
-| 14B 480p | `Wan-AI/Wan2.1-T2V-14B-Diffusers`, 832x480 | 2.30x | 0.099 / 0.149 | Measured with the research harness. The shipped backend gave the same frames on the four development prompts (Qualification evidence) |
+| 14B 480p | `Wan-AI/Wan2.1-T2V-14B-Diffusers`, 832x480 | 2.30x | 0.099 / 0.149 | Measured with the research harness. The shipped backend at commit `e84a14400` gave the same frames on the four development prompts (Qualification evidence) |
 | 14B 720p | `Wan-AI/Wan2.1-T2V-14B-Diffusers`, 1280x720 | 2.67x | 0.102 / 0.141 | Research harness only |
 | 1.3B 480p | `Wan-AI/Wan2.1-T2V-1.3B-Diffusers`, 832x480 | 2.07x | 0.053 / 0.102 | Speed from the research harness. The shipped backend passed the GPU test on one prompt at LPIPS 0.046, bound 0.10 |
 
@@ -170,7 +173,10 @@ from the scarf row under Qualification evidence.
 ## Notes
 
 - Memory usage: peak allocated memory at the default, in GiB. Per-request
-  cache state is 64 MiB and is released after every request.
+  cache state was 64 MiB before the change of 2026-10-08. The change holds a
+  solver checkpoint through the early phase as well, so this figure and the
+  table below are to be re-measured. The state is released after every
+  request.
 
   | Profile | Uncached | LeapCache |
   | --- | ---: | ---: |
@@ -228,10 +234,10 @@ row below was measured at 0.040 in today's definition.
 
 **The shipped backend against the research harness.** The tables below come
 from a research harness with its own controller. The shipped backend at commit
-`e84a14400`, before the knob was redefined, was run in Environment 2 on the
-four development prompts, each on the same GPU as its uncached reference.
-Every prompt gave the same frame hash as the harness, and wall times were
-within 0.6 s of it:
+`e84a14400`, before the knob was redefined and before the dropped early steps
+were also redone, was run in Environment 2 on the four development prompts,
+each on the same GPU as its uncached reference. Every prompt gave the same
+frame hash as the harness, and wall times were within 0.6 s of it:
 
 | Prompt | Model runs (of 80) | Wall time | Uncached | LPIPS vs uncached |
 | --- | ---: | ---: | ---: | ---: |
@@ -284,5 +290,5 @@ methods are in the RFC. All ran on the four development prompts only.
   for every job. Wall times agreed within 0.65%.
 - Not run: the online `/v1/videos` path with the cache on hardware, the 720p
   profile with the shipped backend, the shipped backend after the knob was
-  redefined, the comparison methods on the held-out and final prompts, and a
-  blinded human review.
+  redefined and after the dropped early steps were also redone, the comparison
+  methods on the held-out and final prompts, and a blinded human review.
