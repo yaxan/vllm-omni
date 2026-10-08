@@ -9,7 +9,6 @@ import math
 from dataclasses import dataclass
 
 from vllm_omni.diffusion.data import DiffusionCacheConfig
-from vllm_omni.diffusion.models.schedulers.scheduling_flow_unipc_multistep import FlowUniPCMultistepScheduler
 
 # Pipeline attributes set by LeapCacheBackend.enable().
 LEAP_CACHE_CONFIG_ATTR = "_leapcache_config"
@@ -22,26 +21,20 @@ TOLERANCE_RATIO = 2.211180530344344
 GUIDANCE_INTERVAL: tuple[float, float] = (600.0, 1000.0)
 
 
-def _reference_sigmas(*steps: int) -> tuple[float, ...]:
-    """Sigma at the given steps of the 40-step shift-5 schedule the profile was tuned on."""
-    reference = FlowUniPCMultistepScheduler(num_train_timesteps=1000, shift=1.0, prediction_type="flow_prediction")
-    reference.set_timesteps(40, device="cpu", shift=5.0)
-    return tuple(float(reference.sigmas[step]) for step in steps)
-
-
-# Noise levels where the warm-up ends, the leap phase ends, and the tolerance stops growing.
-SIGMA_WARMUP, SIGMA_PHASE, SIGMA_LATE = _reference_sigmas(7, 18, 31)
+# Noise levels where the warm-up ends, the leap phase ends, and the tolerance stops growing. They were tuned once on
+# the 40-step shift-5 Wan2.1 schedule (its steps 7, 18 and 31) and rounded; the rounded values land on the same steps.
+SIGMA_WARMUP, SIGMA_PHASE, SIGMA_LATE = 0.96, 0.86, 0.60
 
 
 @dataclass(frozen=True)
 class LeapCacheConfig:
     """Runtime config for LeapCache.
 
-    ``threshold`` is the predicted change in the model output, relative to that output,
-    accepted before the model runs again.
+    ``threshold`` is the predicted change in the model output, relative to that output, accepted
+    before the model runs again in the early phase; the late phase accepts ``TOLERANCE_RATIO`` times it.
     """
 
-    threshold: float = 0.064
+    threshold: float = 0.044
 
     def __post_init__(self) -> None:
         threshold = self.threshold

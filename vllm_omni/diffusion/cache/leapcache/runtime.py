@@ -62,7 +62,6 @@ class _Request:
     timesteps: torch.Tensor
     warmup: int
     phase_boundary: int
-    normalizer: float
     state: CacheState
     visited: list[int] = field(default_factory=list)
     late: bool = False
@@ -110,9 +109,6 @@ class LeapCacheRuntime:
         sigmas, num_steps = scheduler.sigmas, len(scheduler.timesteps)
         warmup = min(num_steps, max(2, int((sigmas[:-1] > SIGMA_WARMUP).sum())))
         phase_boundary = next((i for i, s in enumerate(sigmas[:-1].tolist()) if s <= SIGMA_PHASE), num_steps - 1)
-        # Normalize so the mean tolerance over the steps that may be skipped equals the knob.
-        skippable = sigmas[warmup:-2].tolist()
-        normalizer = sum(tolerance_factor(s) for s in skippable) / len(skippable) if skippable else 1.0
         self.stats = LeapCacheStats()
         self._request = _Request(
             scheduler=scheduler,
@@ -120,7 +116,6 @@ class LeapCacheRuntime:
             timesteps=scheduler.timesteps,
             warmup=warmup,
             phase_boundary=phase_boundary,
-            normalizer=normalizer,
             state=CacheState(self.config.threshold),
         )
         try:
@@ -190,7 +185,7 @@ class LeapCacheRuntime:
         return request, request.step
 
     def _threshold(self, request: _Request, index: int) -> float:
-        return self.config.threshold * (tolerance_factor(float(request.sigmas[index])) / request.normalizer)
+        return self.config.threshold * tolerance_factor(float(request.sigmas[index]))
 
     def _bind(self, request: _Request, scheduler: FlowUniPCMultistepScheduler, next_index: int) -> None:
         indices = request.visited + ([next_index] if next_index < request.num_steps else [])

@@ -567,7 +567,7 @@ class OmniEngineBase:
                 "step_cache_dit_max_history": 2,
             }
         if cache_backend == "leap_cache":
-            return {"leap_threshold": 0.064}
+            return {"leap_threshold": 0.044}
         return None
 
     @staticmethod

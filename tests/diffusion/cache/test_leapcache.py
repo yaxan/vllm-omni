@@ -95,7 +95,7 @@ def _make_pipeline() -> Wan22Pipeline:
     return pipeline
 
 
-def _enable(pipeline, threshold: float = 0.064) -> LeapCacheRuntime:
+def _enable(pipeline, threshold: float = 0.044) -> LeapCacheRuntime:
     LeapCacheBackend(DiffusionCacheConfig(leap_threshold=threshold)).enable(pipeline)
     runtime = get_leapcache_runtime(pipeline)
     assert runtime is not None
@@ -186,7 +186,7 @@ def _assert_estimator_untouched(state: CacheState, snapshot) -> None:
 class TestLeapCacheConfig:
     def test_threshold_comes_from_leap_threshold(self):
         assert GUIDANCE_INTERVAL == (600.0, 1000.0)
-        assert LeapCacheConfig.from_diffusion_cache_config(DiffusionCacheConfig()).threshold == 0.064
+        assert LeapCacheConfig.from_diffusion_cache_config(DiffusionCacheConfig()).threshold == 0.044
         assert LeapCacheConfig.from_diffusion_cache_config(DiffusionCacheConfig(leap_threshold=0.1)).threshold == 0.1
 
     def test_unknown_cache_config_keys_are_rejected(self):
@@ -204,10 +204,10 @@ class TestLeapCacheBackend:
         backend = get_cache_backend("leap_cache", {"leap_threshold": 0.1})
         assert isinstance(backend, LeapCacheBackend)
         assert backend.config.leap_threshold == 0.1
-        assert get_cache_backend("leap_cache", {}).config.leap_threshold == 0.064
+        assert get_cache_backend("leap_cache", {}).config.leap_threshold == 0.044
 
     def test_engine_default_cache_config(self):
-        assert OmniEngineBase._get_default_cache_config("leap_cache") == {"leap_threshold": 0.064}
+        assert OmniEngineBase._get_default_cache_config("leap_cache") == {"leap_threshold": 0.044}
 
     def test_enable_attaches_config_and_runtime(self):
         pipeline = _make_pipeline()

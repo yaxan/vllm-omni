@@ -670,8 +670,9 @@ class DiffusionCacheConfig:
     step_cache_dit_max_history: int = 2
 
     # LeapCache parameters [leap_cache only]
-    # Default: 0.064 predicted relative change of the model output accepted before the model runs again
-    leap_threshold: float = 0.064
+    # Default: 0.044 predicted relative change of the model output accepted before the model runs again (early
+    # phase; the late phase accepts 2.2 times it)
+    leap_threshold: float = 0.044
 
     # Additional parameters that may be passed but not explicitly defined
     _extra_params: dict[str, Any] = field(default_factory=dict, repr=False)
