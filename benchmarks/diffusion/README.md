@@ -188,7 +188,7 @@ DFX uses the repository's normal model/cache resolution.
 
 `quantization_quality.py` generates each prompt twice with the same seed, once as the BF16
 baseline and once with a quantization method (`--quantization fp8`) or a cache backend
-(`--cache-backend leap_cache --cache-config '{"leap_threshold": 0.064}'`), and reports the
+(`--cache-backend leap_cache --cache-config '{"leap_threshold": 0.044}'`), and reports the
 variant's speed-up, peak memory and mean LPIPS against the baseline (LPIPS scores how different
 two frames look; 0 is the same picture). `--flow-shift` sets Wan's scheduler shift when a run needs
 something other than the model default. To score two saved clips against each other, pass two

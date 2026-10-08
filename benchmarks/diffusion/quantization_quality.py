@@ -59,7 +59,7 @@ Cache backend as the variant (text-to-video):
         --model Wan-AI/Wan2.1-T2V-14B-Diffusers \
         --task t2v \
         --cache-backend leap_cache \
-        --cache-config '{"leap_threshold": 0.064}' \
+        --cache-config '{"leap_threshold": 0.044}' \
         --prompts "a ballerina practicing in the dance studio" \
         --height 480 --width 832 \
         --num-frames 81 --num-inference-steps 40 --seed 42
@@ -526,7 +526,7 @@ def parse_args():
         "--cache-config",
         type=json.loads,
         default=None,
-        help="Cache backend settings as JSON, e.g. '{\"leap_threshold\": 0.064}'. Default: the backend defaults.",
+        help="Cache backend settings as JSON, e.g. '{\"leap_threshold\": 0.044}'. Default: the backend defaults.",
     )
     parser.add_argument(
         "--compare",
