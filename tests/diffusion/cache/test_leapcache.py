@@ -160,7 +160,7 @@ def _assert_same_calls(actual, expected) -> None:
 
 
 def _assert_same_solver_state(actual, expected) -> None:
-    for name in ("model_outputs", "timestep_list", "last_sample", "_step_index", "lower_order_nums"):
+    for name in ("model_outputs", "timestep_list", "last_sample", "_step_index", "lower_order_nums", "this_order"):
         left, right = getattr(actual, name), getattr(expected, name)
         if isinstance(left, list):
             assert len(left) == len(right), name
@@ -244,9 +244,12 @@ class TestLeapCacheBackend:
         runtime = get_leapcache_runtime(pipeline)
         assert _diffuse(pipeline).calls and runtime.stats.forwards > 0
         latents = torch.zeros(1, 16, 1, 1, 1)
-        runtime.request(pipeline.scheduler, latents).__enter__()  # a request the loop never finished
+        pending = runtime.request(pipeline.scheduler, latents)
+        pending.__enter__()  # a request the loop never finished
+        assert runtime._request is not None
         backend.refresh(pipeline, num_inference_steps=40, verbose=False)
-        assert runtime.stats == LeapCacheStats()
+        assert runtime._request is None and runtime.stats == LeapCacheStats()
+        pending.__exit__(None, None, None)  # close it, or its teardown would clear a later request
         with runtime.request(pipeline.scheduler, latents):
             pass
         with pytest.raises(RuntimeError, match="not enabled"):
@@ -335,10 +338,15 @@ def test_miss_warmup_and_final_step_run_and_early_leaps_drop_steps(num_steps, gu
     early = result.visited[: result.visited.index(first_late)]
     assert early and all(index in result.fresh for index in early)
     assert result.visited[len(early) :] == list(range(first_late, num_steps))
-    assert pipeline.scheduler.timesteps.tolist() == [result.timesteps[index] for index in result.visited]
+    # The dropped steps left the loop, and the replays put them back: the run ends on the full schedule.
+    assert pipeline.scheduler.timesteps.tolist() == result.timesteps
+    assert pipeline.scheduler.step_index == num_steps
     assert [call.args[0] for call in record_denoise_step.call_args_list] == result.visited
     assert pipeline._num_timesteps == num_steps
-    assert runtime.stats.trial_solver_steps > 0 and runtime.stats.replayed_solver_steps > 0
+    # Each skipped step, dropped or held, is redone once, plus the checkpoint node of every replay.
+    gaps = sum(1 for a, b in zip(result.fresh, result.fresh[1:]) if b > a + 1)
+    assert gaps > 0 and runtime.stats.trial_solver_steps > 0
+    assert runtime.stats.replayed_solver_steps == (num_steps - len(result.fresh)) + gaps
 
 
 def test_miss_trial_steps_leave_the_live_solver_and_estimator_untouched(monkeypatch):
@@ -378,11 +386,23 @@ def test_miss_replay_blends_the_two_real_outputs_and_never_observes_them(monkeyp
             result = before_scheduler_step(noise_pred, latents)
             assert result is latents
         else:
-            # Expected: from the checkpoint, redo the held stretch with the straight-line blend in sigma.
+            start, end, next_index = checkpoint.index, step.index, request.next_index
+            dropped = start + 1 not in request.visited  # a leap dropped the interval; else the late phase held it
+            # Expected: from the checkpoint, redo every step of the interval on the dense schedule with the
+            # straight-line blend in sigma of the two real outputs.
+            dense = sorted(set(request.visited) | set(range(start + 1, end)))
+            nodes = dense + ([next_index] if next_index < request.num_steps else [])
+            assert dense == list(range(end + 1))
             expected_solver = copy.deepcopy(checkpoint.scheduler)
-            expected_solver.sigmas, expected_solver.timesteps = pipeline.scheduler.sigmas, pipeline.scheduler.timesteps
-            expected_solver.num_inference_steps = pipeline.scheduler.num_inference_steps
-            expected, start, end = checkpoint.latents, checkpoint.index, step.index
+            expected_solver.sigmas = torch.cat([request.sigmas[nodes], request.sigmas[-1:]])
+            expected_solver.timesteps = request.timesteps[nodes]
+            expected_solver.num_inference_steps = len(nodes)
+            assert expected_solver.step_index == start
+            # A held stretch is already in the schedule next_step bound; a dropped one is added to it here.
+            assert torch.equal(expected_solver.sigmas, pipeline.scheduler.sigmas) == (not dropped)
+            # The model saw the latent as it was before the replay.
+            assert torch.equal(pipeline.transformer.calls[-1][1], latents.to(torch.bfloat16))
+            expected = checkpoint.latents
             sigma_start, sigma_end = request.sigmas[start].item(), request.sigmas[end].item()
             for index in range(start, end):
                 weight = (request.sigmas[index].item() - sigma_start) / (sigma_end - sigma_start)
@@ -391,16 +411,32 @@ def test_miss_replay_blends_the_two_real_outputs_and_never_observes_them(monkeyp
                 expected = expected_solver.step(field, request.timesteps[index], expected, return_dict=False)[0]
             result = before_scheduler_step(noise_pred, latents)
             assert torch.equal(result, expected) and not torch.equal(result, latents)
+            # The live solver continues from the dense past: its schedule, step index and history are the copy's.
             _assert_same_solver_state(pipeline.scheduler, expected_solver)
-            replays.append((start, end))
+            assert torch.equal(pipeline.scheduler.sigmas, expected_solver.sigmas)
+            assert torch.equal(pipeline.scheduler.timesteps, expected_solver.timesteps)
+            assert pipeline.scheduler.num_inference_steps == expected_solver.num_inference_steps
+            assert pipeline.scheduler.step_index == end
+            replays.append((start, end, dropped))
+        if step.run and step.index < request.num_steps - 1:
+            assert request.checkpoint.index == step.index and request.checkpoint.latents is result
+        else:
+            # A held step takes no checkpoint, and neither does the last step: nothing could read it.
+            assert request.checkpoint is checkpoint
+        assert request.visited == list(range(step.index + 1))
         assert len(pipeline.transformer.calls) == calls
         _assert_estimator_untouched(state, snapshot)
         return result
 
     monkeypatch.setattr(runtime, "before_scheduler_step", checked_before_scheduler_step)
     result = _diffuse(pipeline)
-    assert replays and torch.isfinite(result.output).all()
-    assert runtime.stats.replayed_solver_steps == sum(end - start for start, end in replays)
+    assert torch.isfinite(result.output).all()
+    # Leaps drop steps before the phase boundary and the late phase holds them after it; both are replayed.
+    phase_boundary = next(index for index, sigma in enumerate(result.sigmas[:-1]) if sigma <= SIGMA_PHASE)
+    assert any(dropped and start < phase_boundary for start, _, dropped in replays)
+    assert any(not dropped and start >= phase_boundary for start, _, dropped in replays)
+    assert all(dropped == (start < phase_boundary) for start, _, dropped in replays)
+    assert runtime.stats.replayed_solver_steps == sum(end - start for start, end, _ in replays)
 
 
 # --- invalidation path ---------------------------------------------------------------------------

@@ -5,10 +5,11 @@
 LeapCache: a step-skipping cache for Wan2.1 text-to-video (14B and 1.3B).
 
 It keeps EasyCache's skip-or-run rule (Zhou et al., 2025) and changes what happens
-around it. Early in the run it never reuses an output: trial solver steps pick the next
-step that needs the model and the steps in between leave the schedule. Late in the run it
-visits every step, holds the last output on skipped steps, and replays the held stretch
-with a blend of the two real outputs once the model runs again. Below timestep 600 only
+around it. Early in the run, skipped steps are dropped from the schedule, so the solver
+takes one long step instead of reusing an old output. Late in the run, skipped steps keep
+the last output. In both phases, when the model next runs, the clip is rewound to the last
+model run and the skipped steps are redone with a blend of the old and the new output, at
+no model cost. The solver then continues from the redone steps. Below timestep 600 only
 the prompt pass runs, through the pipeline's ``guidance_interval`` option, unless the
 request sets its own interval.
 

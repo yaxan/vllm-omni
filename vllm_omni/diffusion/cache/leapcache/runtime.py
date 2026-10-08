@@ -47,7 +47,7 @@ class _Step:
 
 @dataclass
 class _Checkpoint:
-    """Solver state, latent and model output at the last model run of the late phase."""
+    """Solver state, latent and model output at the last model run."""
 
     index: int
     scheduler: FlowUniPCMultistepScheduler
@@ -63,7 +63,10 @@ class _Request:
     warmup: int
     phase_boundary: int
     state: CacheState
+    # Nodes in the solver's schedule: the steps the loop visited plus the replayed ones.
     visited: list[int] = field(default_factory=list)
+    # The step the solver moves to after the current one; set by next_step.
+    next_index: int = 0
     late: bool = False
     step: _Step | None = None
     checkpoint: _Checkpoint | None = None
@@ -85,7 +88,8 @@ class LeapCacheRuntime:
     ``request`` owns the per-request state. Per step, ``begin_step`` tells the runtime which step
     starts and how many passes it runs, ``predict_noise`` holds or runs each pass, ``next_step``
     picks the next step and rebinds the solver's schedule, and ``before_scheduler_step`` replays
-    held steps once the model has run again.
+    the steps skipped since the last model run, dropped by a leap or held late, once the model
+    has run again.
     """
 
     def __init__(self, config: LeapCacheConfig) -> None:
@@ -152,25 +156,28 @@ class LeapCacheRuntime:
         return output
 
     def next_step(self, noise_pred: torch.Tensor, latents: torch.Tensor) -> int:
-        """Return the next step; the solver's schedule becomes the steps visited so far plus that one."""
+        """Return the next step; the solver's schedule becomes the nodes visited so far plus that one."""
         request, step = self._current()
         request.visited.append(step.index)
         next_index = step.index + 1
         if not request.late and step.index >= request.warmup - 1:
             next_index = self._leap(request, step, noise_pred, latents)
+        request.next_index = next_index
         self._bind(request, request.scheduler, next_index)
         return next_index
 
     def before_scheduler_step(self, noise_pred: torch.Tensor, latents: torch.Tensor) -> torch.Tensor:
-        """In the late phase, replay the held steps once the model runs again, then checkpoint the run."""
+        """Once the model has run, replay the steps skipped since the last run, then checkpoint the run."""
         request, step = self._current()
-        if not request.late or not step.run:
+        if not step.run:
             return latents
         checkpoint = request.checkpoint
         if checkpoint is not None and step.index > checkpoint.index + 1:
             latents = self._replay(request, checkpoint, step.index, noise_pred)
         # The replay steps the checkpoint's solver in place, so a checkpoint is used once; copy a fresh one.
-        request.checkpoint = _Checkpoint(step.index, copy.deepcopy(request.scheduler), latents, noise_pred)
+        # The last step takes none, since no later step could read it.
+        if step.index + 1 < request.num_steps:
+            request.checkpoint = _Checkpoint(step.index, copy.deepcopy(request.scheduler), latents, noise_pred)
         return latents
 
     def _active(self) -> _Request:
@@ -218,11 +225,16 @@ class LeapCacheRuntime:
         return request.num_steps - 1
 
     def _replay(self, request: _Request, checkpoint: _Checkpoint, end: int, noise_pred: torch.Tensor) -> torch.Tensor:
-        """Redo the steps from the checkpoint to ``end`` with a blend of the two real outputs; no model calls."""
+        """Redo the steps from the checkpoint to ``end`` with a blend of the two real outputs; no model calls.
+
+        The steps between were dropped by a leap or held late. The copy is bound through every
+        node between; the live solver takes its state, so the replayed nodes stay in its schedule
+        and history.
+        """
         replay, live = checkpoint.scheduler, request.scheduler
-        replay.sigmas, replay.timesteps = live.sigmas, live.timesteps
-        replay.num_inference_steps = live.num_inference_steps
         start = checkpoint.index
+        request.visited = sorted(set(request.visited) | set(range(start + 1, end)))
+        self._bind(request, replay, request.next_index)
         sigma_start, sigma_end = float(request.sigmas[start]), float(request.sigmas[end])
         latents = checkpoint.latents
         for index in range(start, end):
