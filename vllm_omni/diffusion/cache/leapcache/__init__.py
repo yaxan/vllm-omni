@@ -18,7 +18,7 @@ Usage:
     omni = Omni(
         model="Wan-AI/Wan2.1-T2V-14B-Diffusers",
         cache_backend="leap_cache",
-        cache_config={"leap_threshold": 0.064},
+        cache_config={"leap_threshold": 0.044},
     )
 """
 
