@@ -31,7 +31,7 @@ Cache methods trade minimal quality for significant speedup. Quality loss is typ
 |--------|-------------|----------|
 | **[TeaCache](diffusion/cache_acceleration/teacache.md)** | Adaptive caching using modulated inputs | Quick setup, balanced quality/speed on single GPU |
 | **[Cache-DiT](diffusion/cache_acceleration/cache_dit.md)** | Multiple caching techniques: DBCache, TaylorSeer, SCM | Fine-grained control, tunable quality-speed tradeoff |
-| **[LeapCache](diffusion/cache_acceleration/leapcache.md)** | Step-skipping cache for Wan2.1 text-to-video: leaps over early steps, redoes skipped steps once the model runs again, skips the late negative-prompt pass | Wan2.1 T2V 14B and 1.3B on one GPU; 2.3x at the default, measured before a design change of 2026-10-08 described in the guide; one knob |
+| **[LeapCache](diffusion/cache_acceleration/leapcache.md)** | Step-skipping cache for Wan2.1 text-to-video: leaps over early steps, redoes skipped steps once the model runs again, skips the late negative-prompt pass | Wan2.1 T2V 14B and 1.3B on one GPU; 2.3x at the default; one knob |
 
 #### Diffusion KV Prefix Caching
 

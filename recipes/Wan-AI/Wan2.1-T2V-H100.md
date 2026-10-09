@@ -2,7 +2,8 @@
 
 > Single-GPU text-to-video for Wan2.1 14B and 1.3B with the LeapCache
 > step-skipping cache: 2.3x lower latency per request at the default setting,
-> at a mean LPIPS of 0.10 against the uncached clip
+> at a mean LPIPS below 0.10 against the uncached clip on the development
+> prompts
 
 ## Summary
 
@@ -23,7 +24,7 @@ Use it when one Wan2.1 text-to-video clip per request on one H100 should take
 about 2.3x less time and a small drift from the uncached clip is acceptable.
 Run without LeapCache when the output must match the uncached clip exactly.
 LeapCache does not run with parallelism. For multi-GPU Wan serving, see the
-[Wan2.2 text-to-video recipe](./Wan2.2-T2V.md). The method is described in the
+[Wan2.2 text-to-video recipe](./Wan2.2-T2V.md). The method is in the
 [LeapCache guide](../../docs/user_guide/diffusion/cache_acceleration/leapcache.md).
 
 ## Supported model contract
@@ -32,18 +33,17 @@ LeapCache does not run with parallelism. For multi-GPU Wan serving, see the
 | --- | --- | --- | --- |
 | Text-to-video | Text prompt, optional negative prompt | MP4 clip of 81 frames at 832x480 for both checkpoints, or 1280x720 for the 14B. The model card recommends 480p for the 1.3B | Offline `Omni`, `POST /v1/videos` and `POST /v1/videos/sync` |
 
-Profiles on this hardware at 81 frames, 40 steps, guidance 4, flow shift 5 and
-the default `leap_threshold`. Every number in this recipe was measured before
-the dropped early steps were also redone, a change made on 2026-10-08 and
-described in the guide; the numbers are to be re-measured. LPIPS is against the
-uncached clip from the same seed, the mean over the four development prompts
-and the worst single prompt:
+Profiles at 81 frames, 40 steps, guidance 4, flow shift 5 and the default
+`leap_threshold`. LPIPS scores how different two frames look, 0 is the same
+picture. Mean over the development prompts and worst single prompt, against
+the uncached clip from the same seed, GPU and compile caches, the files
+`torch.compile` saves on disk:
 
 | Profile | Checkpoint | Speed-up | LPIPS mean / worst | Status |
 | --- | --- | ---: | ---: | --- |
-| 14B 480p | `Wan-AI/Wan2.1-T2V-14B-Diffusers`, 832x480 | 2.30x | 0.099 / 0.149 | Measured with the research harness. The shipped backend at commit `e84a14400` gave the same frames on the four development prompts (Qualification evidence) |
+| 14B 480p | `Wan-AI/Wan2.1-T2V-14B-Diffusers`, 832x480 | 2.33x | 0.094 / 0.133 | Shipped backend, four development prompts (Qualification evidence). Research harness: 2.30x at 0.099 / 0.149 |
 | 14B 720p | `Wan-AI/Wan2.1-T2V-14B-Diffusers`, 1280x720 | 2.67x | 0.102 / 0.141 | Research harness only |
-| 1.3B 480p | `Wan-AI/Wan2.1-T2V-1.3B-Diffusers`, 832x480 | 2.07x | 0.053 / 0.102 | Speed from the research harness. The shipped backend passed the GPU test on one prompt at LPIPS 0.046, bound 0.10 |
+| 1.3B 480p | `Wan-AI/Wan2.1-T2V-1.3B-Diffusers`, 832x480 | 2.07x | 0.053 / 0.102 | Research harness. Shipped backend GPU test, one prompt: LPIPS 0.0446, bound 0.10 |
 
 With LeapCache on: one request per batch (`max_num_seqs=1`, the default), one
 GPU, and `guidance_interval=[600, 1000]` unless the request sets its own
@@ -68,14 +68,14 @@ interval.
 
 - Accelerator model and per-device memory: NVIDIA H100 80GB HBM3
 - Number of devices: 1
-- Device interconnect: not applicable to this single-GPU profile
+- Device interconnect: none, one GPU
 - Host memory: not relevant, no CPU offload
 - Qualification scope: the checkpoints in BF16 as shipped, one request at a
   time, regional `torch.compile` with dynamic shapes, the three profiles above
 
 ## Software environment
 
-Environment 1, where every number below was measured unless stated:
+Environment 1, the research harness:
 
 - OS: Linux
 - Python: 3.12.3
@@ -83,13 +83,10 @@ Environment 1, where every number below was measured unless stated:
 - PyTorch: 2.13.0+cu130
 - diffusers: 0.40.0 (cache-dit 1.5.0 for the comparison method only)
 - vLLM: 0.29.0
-- vLLM-Omni: 0.1.dev3119, with the research harness described under
-  Qualification evidence
+- vLLM-Omni: 0.1.dev3119 with the research harness
 
-Environment 2, a cross-check: torch 2.13.0+cu132, vLLM 0.30.0, vLLM-Omni at
-upstream `3bc3f1a7` with PR #8446. On the development prompts LeapCache gave
-2.31x at LPIPS 0.082 there, against 2.30x at 0.099 in Environment 1. Frame
-hashes change with the toolchain. The speed-ups move by 0.01x.
+Environment 2, the shipped backend: driver NVIDIA 580.82.07, PyTorch
+2.13.0+cu132, vLLM 0.30.0, vLLM-Omni 0.1.dev3395+gedcea3f97.
 
 ## Command
 
@@ -102,8 +99,8 @@ vllm serve Wan-AI/Wan2.1-T2V-14B-Diffusers --omni --port 8091 \
   --cache-config '{"leap_threshold": 0.044}'
 ```
 
-Request one clip with the measured settings. The server uses an empty negative
-prompt when the request sends none, which is the measured condition:
+Request one clip with the measured settings. A request without a negative
+prompt uses an empty one, the measured condition:
 
 ```bash
 curl --fail-with-body -X POST http://localhost:8091/v1/videos/sync \
@@ -129,8 +126,8 @@ python examples/offline_inference/text_to_video/text_to_video.py \
 ```
 
 Run the same command without `--cache-backend leap_cache`, writing to
-`ballet_uncached.mp4`, to get the same-seed reference clip. For the 720p
-profile use `--height 720 --width 1280`. For the 1.3B use
+`ballet_uncached.mp4`, to get the paired uncached clip. For the 720p profile
+use `--height 720 --width 1280`. For the 1.3B use
 `--model Wan-AI/Wan2.1-T2V-1.3B-Diffusers`.
 
 ## Verification
@@ -149,57 +146,53 @@ height=480
 nb_read_frames=81
 ```
 
-Compare the wall-clock time of the cached and the uncached command. On the
-development prompts the default gives 2.30x against the uncached run of 206 s
-per clip. For the ballet prompt in the commands above the default gave 2.6x at
-LPIPS 0.025 in the research harness.
+Compare the `Total generation time` lines the script prints. Run as written in
+one session of Environment 2, they read 204.4 s uncached and 90.2 s cached,
+2.27x. The four development prompts give 2.33x (Qualification evidence).
 
-To reproduce an LPIPS number, score the cached clip against the same-seed
-uncached clip:
+Score the cached clip against the paired uncached clip:
 
 ```bash
 python benchmarks/diffusion/quantization_quality.py --compare ballet_uncached.mp4 ballet_leapcache.mp4
 ```
 
-The script needs the `lpips` package (`pip install lpips`, part of the `dev`
-extra). It prints the mean and the worst frame. The default measured 0.099 mean
-on the development prompts. The example script run with its own defaults
-(seed 42, a model-specific negative prompt and guidance) on the scarf
-development prompt gave 204.2 s uncached and 72.3 s cached, mean LPIPS 0.085
-(worst frame 0.114), with peak reserved memory 44.4 GiB in both runs. The
-example script's defaults differ from the harness protocol, so this run differs
-from the scarf row under Qualification evidence.
+The script needs the `lpips` package (`pip install lpips`, in the `dev` extra)
+and prints the mean and the worst frame: 0.1105 and 0.1635 (frame 80) for the
+two clips above.
+
+### Reproducibility
+
+Pair every cached clip with an uncached clip from the same session, GPU and
+compile caches. The Wan pipeline runs the solver in bf16, so its frames depend
+on the compile-cache state. Uncached clips of the same prompt, seed, GPU, code,
+driver and packages differed by LPIPS 0.009 to 0.239 between two compile-cache
+states. Re-running one clip with the earlier caches reproduced its earlier
+frames exactly. This is a property of the pipeline, present without the cache.
+Cached-vs-uncached LPIPS moves by about 0.02 between cache states. To pin the
+caches, point `TORCHINDUCTOR_CACHE_DIR` and `TRITON_CACHE_DIR` at directories
+you keep, one pair per GPU, and reuse them for every run you compare. A frame
+hash from this recipe holds only with the same caches.
 
 ## Notes
 
-- Memory usage: peak allocated memory at the default, in GiB. Per-request
-  cache state was 64 MiB before the change of 2026-10-08. The change holds a
-  solver checkpoint through the early phase as well, so this figure and the
-  table below are to be re-measured. The state is released after every
+- Memory: peak reserved GPU memory for the offline commands above is 44.40 GiB
+  uncached and 44.36 GiB cached. The 1.3B GPU test reports peak allocated
+  memory: 18.67 GiB uncached, 18.66 GiB cached. Per-request cache state is a
+  few latent-sized tensors and a copy of the solver, released after every
   request.
-
-  | Profile | Uncached | LeapCache |
-  | --- | ---: | ---: |
-  | 14B 480p | 39.96 to 40.00 | 40.05 |
-  | 14B 720p | 43.21 to 43.25 | 43.36 |
-  | 1.3B 480p | 15.17 to 15.21 | 15.26 |
-
 - Key flags: `--cache-backend leap_cache` turns the cache on.
   `--cache-config '{"leap_threshold": 0.044}'` is the one knob at its default.
-  The documented range is 0.011 to 0.088 (table below). Leave `--max-num-seqs`
-  at its default of 1.
+  The documented range is 0.011 to 0.088. Leave `--max-num-seqs` at its default
+  of 1.
 - Guidance interval: with LeapCache on, a request that sets no
   `guidance_interval` runs with `[600, 1000]`: no negative-prompt pass below
   timestep 600, the last 9 of 40 steps. See the
   [Videos API](../../docs/serving/videos_api.md#wan-text-to-video-guidance-interval).
 - Negative prompt: the measurements used an empty negative prompt unless
-  stated. The standard Wan negative prompt drifts less: LPIPS 0.066 / 0.074 at
-  2.28x.
+  stated. In the research harness the standard Wan negative prompt drifts less:
+  LPIPS 0.066 / 0.074 at 2.28x.
 - Known limitations: Wan2.1 text-to-video only, one GPU, one video per batch
-  (what fails and how is in the guide). Quantized checkpoints, CUDA-graph
-  capture, throughput and concurrency were not measured. The two H100s of the
-  test machine do not produce the same frames as each other, so compare cached
-  and uncached clips from the same GPU.
+  (details in the guide, Not run list under Qualification evidence).
 
 ## Supported features
 
@@ -218,52 +211,56 @@ from the scarf row under Qualification evidence.
 
 Setup: Wan2.1-T2V-14B-Diffusers (revision `38ec498c`), BF16, 832x480, 81
 frames, 40-step FlowUniPC, guidance scale 4, flow shift 5, empty negative
-prompt unless stated, seed 179961516, Environment 1, one request at a time,
-one untimed warm-up per process, then one request timed by wall clock on an
-otherwise idle GPU. Prompt sets: 7 development prompts, the 4 tuned on in the
-tables below, 8 held-out prompts, and 4 final prompts never tuned on. LPIPS is
-the mean over all 81 frames against the uncached clip from the same seed on the
-same GPU. "Mean / worst" is the mean over a prompt set and the worst single
-prompt.
+prompt unless stated, seed 179961516, one request at a time, one untimed
+warm-up per process, then one request timed by wall clock on an otherwise idle
+GPU. Prompt sets: 7 development prompts, the 4 tuned on in the tables below, 8
+held-out prompts, and 4 final prompts never tuned on. LPIPS is the mean over
+all 81 frames against the uncached clip from the same seed, GPU, environment
+and compile caches.
 
-The knob was redefined after these runs. The setting labelled `0.064` then is
-the default `0.044` today: the same tolerance, which the old definition counted
-as 1.457 times today's value. At the default, the new definition makes the same
-skip decisions on the 40-step, flow-shift-5 schedule. The 50-step, flow-shift-3
-row below was measured at 0.040 in today's definition.
+The four-prompt table comes from the shipped backend in Environment 2. The
+other tables were measured with the research harness in Environment 1 before
+the replay over leapt intervals was added (one prompt per model showed a 0.001
+difference).
 
-**The shipped backend against the research harness.** The tables below come
-from a research harness with its own controller. The shipped backend at commit
-`e84a14400`, before the knob was redefined and before the dropped early steps
-were also redone, was run in Environment 2 on the four development prompts,
-each on the same GPU as its uncached reference. Every prompt gave the same
-frame hash as the harness, and wall times were within 0.6 s of it:
+**The shipped backend**, four development prompts. Each cached run is scored
+against an uncached run of the same prompt made in the same session on the
+same GPU with the same compile caches. Model runs are out of 80, two per step.
+"Worst" is the worst single frame:
 
-| Prompt | Model runs (of 80) | Wall time | Uncached | LPIPS vs uncached |
-| --- | ---: | ---: | ---: | ---: |
-| hummingbird | 28 | 74.7 s | 206.3 s | 0.036 |
-| pumpkin | 40 | 104.8 s | 205.4 s | 0.110 |
-| scarf | 32 | 84.4 s | 205.8 s | 0.096 |
-| train | 37 | 97.1 s | 205.4 s | 0.085 |
+| Prompt | Model runs | Cached | Uncached | Speed-up | LPIPS mean / worst frame |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| hummingbird | 28 | 74.5 s | 204.9 s | 2.75x | 0.041 / 0.060 |
+| scarf | 31 | 82.0 s | 204.9 s | 2.50x | 0.121 / 0.162 |
+| pumpkin | 41 | 106.9 s | 204.6 s | 1.91x | 0.133 / 0.178 |
+| train | 36 | 94.4 s | 204.3 s | 2.16x | 0.082 / 0.136 |
+| mean | 34.0 | | | 2.33x | 0.094 |
 
-**The knob**, development prompts. The last column is the cached clip's VBench
-aesthetic score minus the uncached clip's. A paired change within 0.03 is
-noise: two uncached clips of one prompt from different seeds differ by 0.04 to
-0.17.
+The backend and the method's standalone reference package give the same frames
+on the same scheduler in 192 CPU configurations. The 1.3B GPU test
+(`tests/diffusion/quantization/test_quantization_quality.py -k leap_cache_wan21_1p3b`)
+makes the uncached and cached clip in one process and passes at LPIPS 0.0446,
+bound 0.10.
 
-| `leap_threshold` | Earlier label | Speed-up | LPIPS mean / worst | VBench aesthetic, paired |
-| ---: | ---: | ---: | ---: | ---: |
-| 0.011 | 0.016 | 1.20x | 0.017 / 0.036 | -0.002 |
-| 0.022 | 0.032 | 1.68x | 0.041 / 0.086 | -0.002 |
-| 0.044 (default) | 0.064 | 2.30x | 0.099 / 0.149 | -0.002 |
-| 0.066 | 0.096 | 2.74x | 0.147 / 0.228 | -0.014 |
-| 0.088 | 0.128 | 2.99x | 0.168 / 0.235 | -0.012 |
+**The knob**, development prompts, research harness. "Mean / worst" is the mean
+over the four prompts and the worst single prompt. The last column is the
+cached clip's VBench aesthetic score minus the uncached clip's. A paired change
+within 0.03 is noise: two uncached clips of one prompt from different seeds
+differ by 0.04 to 0.17.
 
-At the same speed, Cache-DiT at its default threshold gives 2.31x at LPIPS
-0.194 / 0.282 and a paired aesthetic change of -0.020. The other comparison
-methods are in the RFC. All ran on the four development prompts only.
+| `leap_threshold` | Speed-up | LPIPS mean / worst | VBench aesthetic, paired |
+| ---: | ---: | ---: | ---: |
+| 0.011 | 1.20x | 0.017 / 0.036 | -0.002 |
+| 0.022 | 1.68x | 0.041 / 0.086 | -0.002 |
+| 0.044 (default) | 2.30x | 0.099 / 0.149 | -0.002 |
+| 0.066 | 2.74x | 0.147 / 0.228 | -0.014 |
+| 0.088 | 2.99x | 0.168 / 0.235 | -0.012 |
 
-**LeapCache at the default under other conditions:**
+At the same speed, Cache-DiT at its default gives 2.31x at LPIPS 0.194 / 0.282
+and a paired aesthetic change of -0.020, on the four development prompts. The
+other comparison methods are in the RFC.
+
+**LeapCache at the default under other conditions**, research harness:
 
 | Condition | Speed-up | LPIPS mean / worst |
 | --- | ---: | ---: |
@@ -273,7 +270,7 @@ methods are in the RFC. All ran on the four development prompts only.
 | Final, 4 prompts never tuned on | 2.30x | 0.164 / 0.229 |
 | Standard Wan negative prompt | 2.28x | 0.066 / 0.074 |
 | 30 steps, guidance 5 | 1.87x | 0.080 / 0.111 |
-| 50 steps, guidance 3, flow shift 3 (0.040 today) | 3.05x | 0.062 / 0.074 |
+| 50 steps, guidance 3, flow shift 3, knob 0.040 | 3.05x | 0.062 / 0.074 |
 | 40 steps, guidance 6 | 2.20x | 0.103 / 0.122 |
 | 1280x720, 81 frames (uncached 784 s) | 2.67x | 0.102 / 0.141 |
 | Wan2.1-T2V-1.3B, 480p (uncached 42 s) | 2.07x | 0.053 / 0.102 |
@@ -282,13 +279,14 @@ methods are in the RFC. All ran on the four development prompts only.
   aesthetic -0.002, range -0.064 to +0.028. Subject, background and motion
   scores move by 0.002 or less. Dynamic degree agrees on all 48 pairs. 44 of 48
   pairs are within noise of the uncached clip.
-- Cost: 32.5 model runs per clip at the default against 80. The solver-only
-  work of the leap and the replay is below timing noise. The wall-clock
-  speed-up is lower than the run count suggests because the timed request
-  includes text encoding and video decoding, which the cache does not touch.
-- Repeatability: 56 jobs re-run in fresh processes gave the same frame hash
-  for every job. Wall times agreed within 0.65%.
-- Not run: the online `/v1/videos` path with the cache on hardware, the 720p
-  profile with the shipped backend, the shipped backend after the knob was
-  redefined and after the dropped early steps were also redone, the comparison
-  methods on the held-out and final prompts, and a blinded human review.
+- Cost: 34.0 model runs per clip at the default against 80 on the four
+  development prompts, with the research harness and the shipped backend
+  alike. The timed request also includes text encoding and video decoding,
+  which the cache does not touch.
+- Repeatability: 56 jobs re-run in fresh processes with the same compile
+  caches gave the same frame hash for every job. Wall times agreed within
+  0.65%.
+- Not run: the online `/v1/videos` path with the cache on hardware, Wan2.2,
+  parallelism, batches above 1, CUDA graphs, quantized checkpoints, the 720p
+  and 1.3B speed rows with the shipped backend, other hardware, Cache-DiT on
+  the held-out and final prompts, and a blinded human review.
