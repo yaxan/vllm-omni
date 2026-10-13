@@ -20,8 +20,9 @@
 
 ## When to use this recipe
 
-Use it when one Wan2.1 text-to-video clip per request on one H100 should take
-about 2.3x less time and a small drift from the uncached clip is acceptable.
+Use it when one Wan2.1 text-to-video clip per request on one H100 should be
+generated about 2.3x faster and a small drift from the uncached clip is
+acceptable.
 Run without LeapCache when the output must match the uncached clip exactly.
 LeapCache does not run with parallelism. For multi-GPU Wan serving, see the
 [Wan2.2 text-to-video recipe](./Wan2.2-T2V.md). The method is in the
@@ -148,7 +149,9 @@ nb_read_frames=81
 
 Compare the `Total generation time` lines the script prints. Run as written in
 one session of Environment 2, they read 204.4 s uncached and 90.2 s cached,
-2.27x. The four development prompts give 2.33x (Qualification evidence).
+2.27x. A session is one stretch of work on one GPU with the same code and
+compile-cache directories. The four development prompts give 2.33x
+(Qualification evidence).
 
 Score the cached clip against the paired uncached clip:
 
@@ -163,22 +166,25 @@ two clips above.
 ### Reproducibility
 
 Pair every cached clip with an uncached clip from the same session, GPU and
-compile caches. The Wan pipeline runs the solver in bf16, so its frames depend
-on the compile-cache state. Uncached clips of the same prompt, seed, GPU, code,
-driver and packages differed by LPIPS 0.009 to 0.239 between two compile-cache
-states. Re-running one clip with the earlier caches reproduced its earlier
-frames exactly. This is a property of the pipeline, present without the cache.
-Cached-vs-uncached LPIPS moves by about 0.02 between cache states. To pin the
-caches, point `TORCHINDUCTOR_CACHE_DIR` and `TRITON_CACHE_DIR` at directories
-you keep, one pair per GPU, and reuse them for every run you compare. A frame
-hash from this recipe holds only with the same caches.
+compile caches. `torch.compile` builds kernels from an on-disk cache, a fresh
+cache can compile kernels that round differently, and the Wan solver runs in
+bf16, so over 40 steps the differences become different frames. The kernel
+difference itself was not inspected. The evidence is that rerunning with the old
+cache directories reproduced the old frames exactly. Uncached clips of the same
+prompt, seed, GPU, code, driver and packages differed by LPIPS 0.009 to 0.239
+between two compile-cache states. This is a property of the pipeline, present
+without the cache. Cached-vs-uncached LPIPS moves by about 0.02 between
+compile-cache states. To pin the caches, point `TORCHINDUCTOR_CACHE_DIR` and
+`TRITON_CACHE_DIR` at directories you keep, one pair per GPU, and reuse them for
+every run you compare. A frame hash from this recipe holds only with the same
+caches.
 
 ## Notes
 
 - Memory: peak reserved GPU memory for the offline commands above is 44.40 GiB
   uncached and 44.36 GiB cached. The 1.3B GPU test reports peak allocated
-  memory: 18.67 GiB uncached, 18.66 GiB cached. Per-request cache state is a
-  few latent-sized tensors and a copy of the solver, released after every
+  memory: 18.67 GiB uncached, 18.66 GiB cached. Per-request LeapCache state is
+  a few latent-sized tensors and a copy of the solver, released after every
   request.
 - Key flags: `--cache-backend leap_cache` turns the cache on.
   `--cache-config '{"leap_threshold": 0.044}'` is the one knob at its default.
@@ -218,17 +224,20 @@ held-out prompts, and 4 final prompts never tuned on. LPIPS is the mean over
 all 81 frames against the uncached clip from the same seed, GPU, environment
 and compile caches.
 
-The four-prompt table comes from the shipped backend in Environment 2. The
-other tables were measured with the research harness in Environment 1 before
-the replay over leapt intervals was added (one prompt per model showed a 0.001
-difference).
+The four-prompt table comes from the shipped backend in Environment 2. The other
+tables come from the research harness in Environment 1. The harness's replay
+covers held steps but not leapt intervals. On the 14B the replay over leapt
+intervals moved mean LPIPS by -0.002 to +0.009 in four readings of three prompts
+(pumpkin in the shipped backend and in a diffusers port of the method, scarf and
+train in that port) at equal forward counts. A forward is one model call, two
+per step. One 1.3B prompt in the port moved 0.001.
 
 **The shipped backend**, four development prompts. Each cached run is scored
 against an uncached run of the same prompt made in the same session on the
-same GPU with the same compile caches. Model runs are out of 80, two per step.
-"Worst" is the worst single frame:
+same GPU with the same compile caches. Forwards are out of 80. "Worst" is the
+worst single frame:
 
-| Prompt | Model runs | Cached | Uncached | Speed-up | LPIPS mean / worst frame |
+| Prompt | Forwards | Cached | Uncached | Speed-up | LPIPS mean / worst frame |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | hummingbird | 28 | 74.5 s | 204.9 s | 2.75x | 0.041 / 0.060 |
 | scarf | 31 | 82.0 s | 204.9 s | 2.50x | 0.121 / 0.162 |
@@ -245,8 +254,8 @@ bound 0.10.
 **The knob**, development prompts, research harness. "Mean / worst" is the mean
 over the four prompts and the worst single prompt. The last column is the
 cached clip's VBench aesthetic score minus the uncached clip's. A paired change
-within 0.03 is noise: two uncached clips of one prompt from different seeds
-differ by 0.04 to 0.17.
+within 0.03 is smaller than the gap between two valid clips of one prompt: two
+uncached clips of one prompt from different seeds differ by 0.04 to 0.17.
 
 | `leap_threshold` | Speed-up | LPIPS mean / worst | VBench aesthetic, paired |
 | ---: | ---: | ---: | ---: |
@@ -278,8 +287,9 @@ other comparison methods are in the RFC.
 - Paired VBench over the 48 prompt-condition pairs of the table above:
   aesthetic -0.002, range -0.064 to +0.028. Subject, background and motion
   scores move by 0.002 or less. Dynamic degree agrees on all 48 pairs. 44 of 48
-  pairs are within noise of the uncached clip.
-- Cost: 34.0 model runs per clip at the default against 80 on the four
+  pairs are within 0.03 aesthetic and 8 imaging-quality points of the uncached
+  clip.
+- Cost: 34.0 forwards per clip at the default against 80 on the four
   development prompts, with the research harness and the shipped backend
   alike. The timed request also includes text encoding and video decoding,
   which the cache does not touch.
